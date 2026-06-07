@@ -18,10 +18,11 @@
   /* HUD */
   #hud {
     position: fixed; top: 0; left: 0; right: 0;
-    display: flex; justify-content: space-between; align-items: center;
+    display: flex; justify-content: space-between; align-items: flex-start;
     padding: max(14px, env(safe-area-inset-top)) 22px 14px 22px;
     pointer-events: none; z-index: 5;
   }
+  .hud-center { display: flex; flex-direction: column; align-items: center; gap: 6px; pointer-events: none; }
   .hud-chip {
     background: rgba(15, 30, 60, 0.32);
     backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
@@ -30,10 +31,16 @@
     text-shadow: 0 2px 4px rgba(0,0,0,0.25);
     display: flex; align-items: center; gap: 8px;
     font-size: clamp(18px, 3.6vmin, 30px);
-    line-height: 1;
+    line-height: 1; white-space: nowrap;
+  }
+  .hud-chip.small { font-size: clamp(13px, 2.7vmin, 21px); padding: 6px 14px; }
+  .hud-chip.blast {
+    background: linear-gradient(180deg, rgba(255,154,61,0.9), rgba(255,107,107,0.9));
+    color: #fff; animation: pulse 0.8s ease-in-out infinite;
   }
   #score-label { font-size: 0.62em; opacity: 0.8; font-weight: 700; letter-spacing: 0.5px; }
   #lives { letter-spacing: 2px; }
+  .hidden { display: none !important; }
 
   /* Overlays */
   .overlay {
@@ -43,7 +50,6 @@
     background: radial-gradient(circle at 50% 35%, rgba(30,55,105,0.55), rgba(12,22,45,0.85));
     backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
   }
-  .overlay.hidden { display: none; }
   .overlay h1 {
     font-size: clamp(40px, 11vmin, 96px); font-weight: 900;
     letter-spacing: -1px; text-shadow: 0 4px 16px rgba(0,0,0,0.35);
@@ -64,9 +70,10 @@
     font-family: inherit;
   }
   .btn:active { transform: translateY(5px); box-shadow: 0 3px 0 #c96a16, 0 6px 12px rgba(0,0,0,0.3); }
-  .hint { margin-top: 22px; font-size: clamp(14px, 2.8vmin, 20px); opacity: 0.7; max-width: 520px; }
+  .legend { margin-top: 22px; font-size: clamp(13px, 2.8vmin, 20px); opacity: 0.85; max-width: 560px; line-height: 1.7; }
+  .legend b { color: #ffe14d; }
   .pulse { animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
 </style>
 </head>
 <body>
@@ -77,6 +84,10 @@
       <span id="score-label">SCORE</span>
       <span id="score">0</span>
     </div>
+    <div class="hud-center">
+      <div class="hud-chip small" id="levelchip">☀️ Lv 1</div>
+      <div class="hud-chip blast hidden" id="blastchip">💥 5.0s</div>
+    </div>
     <div class="hud-chip" id="lives">❤️❤️❤️❤️❤️</div>
   </div>
 
@@ -84,7 +95,11 @@
     <h1>🎈 Balloon Pop</h1>
     <div class="sub">Tap the balloons before they float away!</div>
     <button class="btn pulse" id="start-btn">Tap to Play</button>
-    <div class="hint">Smaller, faster balloons are worth more points. You have 5 lives — don't let them escape off the top!</div>
+    <div class="legend">
+      Smaller, faster balloons score more. You have 5 lives — don't let balloons escape off the top!<br>
+      Reach <b>750</b> to enter the <b>Storm</b> ⛈️ — but beware spiky mines: tapping one <b>costs points</b>.<br>
+      Grab power-ups: <b>✈️ Plane</b> strafes the screen, <b>💥 Blast</b> gives 5s of explosive taps.
+    </div>
   </div>
 
   <div id="gameover" class="overlay hidden">
@@ -99,184 +114,178 @@
 <script>
 (function () {
   "use strict";
+  var TAU = Math.PI * 2;
 
-  // ---------- Canvas setup ----------
+  // ---------- Canvas ----------
   var canvas = document.getElementById("game");
   var ctx = canvas.getContext("2d");
   var W = 0, H = 0, DPR = 1;
 
+  // ---------- State ----------
+  var STATE = { START: 0, PLAYING: 1, OVER: 2 };
+  var state = STATE.START;
+  var MAX_LIVES = 5;
+  var LEVEL2_SCORE = 750;
+
+  var level = 1;
+  var balloons = [], particles = [], floaters = [], powerups = [], planes = [], rings = [], rain = [];
+  var bolt = null, banner = null;
+  var score = 0, lives = MAX_LIVES, elapsed = 0, spawnTimer = 0, powerTimer = 0;
+  var blastTimer = 0, flashRed = 0, lightning = 0, lightningTimer = 0, shake = 0;
+  var best = 0;
+  try { best = parseInt(localStorage.getItem("balloonPopBest") || "0", 10) || 0; } catch (e) { best = 0; }
+
+  var COLORS = [
+    { c: "#ff5a6e", h: "#ff97a4" }, { c: "#ffb13d", h: "#ffd28a" },
+    { c: "#ffe14d", h: "#fff0a0" }, { c: "#4fd97a", h: "#9deeb4" },
+    { c: "#46c3ff", h: "#a3e3ff" }, { c: "#a36bff", h: "#cdaaff" },
+    { c: "#ff6fd0", h: "#ffb0e6" }
+  ];
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function choice(a) { return a[(Math.random() * a.length) | 0]; }
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  // ---------- Sky (cached) ----------
+  var skyGrad = null;
+  function buildSky() {
+    skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+    if (level >= 2) {
+      skyGrad.addColorStop(0, "#161c2b");
+      skyGrad.addColorStop(0.45, "#28324c");
+      skyGrad.addColorStop(0.8, "#41506e");
+      skyGrad.addColorStop(1, "#5a6884");
+    } else {
+      skyGrad.addColorStop(0, "#3a7bd5");
+      skyGrad.addColorStop(0.45, "#5e9fe0");
+      skyGrad.addColorStop(0.8, "#acd5f2");
+      skyGrad.addColorStop(1, "#dff1fb");
+    }
+  }
+
   function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth;
-    H = window.innerHeight;
-    canvas.width = Math.floor(W * DPR);
-    canvas.height = Math.floor(H * DPR);
-    canvas.style.width = W + "px";
-    canvas.style.height = H + "px";
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR); canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px"; canvas.style.height = H + "px";
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     buildSky();
+    if (level >= 2) initRain();
   }
   window.addEventListener("resize", resize);
   window.addEventListener("orientationchange", function () { setTimeout(resize, 150); });
 
-  // ---------- Sky gradient (cached) ----------
-  var skyGrad = null;
-  function buildSky() {
-    skyGrad = ctx.createLinearGradient(0, 0, 0, H);
-    skyGrad.addColorStop(0, "#3a7bd5");
-    skyGrad.addColorStop(0.45, "#5e9fe0");
-    skyGrad.addColorStop(0.8, "#acd5f2");
-    skyGrad.addColorStop(1, "#dff1fb");
-  }
-
-  // ---------- Audio (Web Audio API) ----------
+  // ---------- Audio ----------
   var audioCtx = null;
   function ensureAudio() {
-    if (!audioCtx) {
-      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-      catch (e) { audioCtx = null; }
-    }
+    if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; } }
     if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
   }
-  // A quick, satisfying synthesised "pop": short pitch-dropping blip + noise transient.
-  function playPop(pitch) {
+  function tone(type, f0, f1, dur, peak, when) {
+    if (!audioCtx) return;
+    var now = audioCtx.currentTime + (when || 0);
+    var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, now);
+    o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), now + dur);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(peak, now + 0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(now); o.stop(now + dur + 0.02);
+  }
+  function noise(dur, peak, shapePow) {
     if (!audioCtx) return;
     var now = audioCtx.currentTime;
-    var osc = audioCtx.createOscillator();
-    var gain = audioCtx.createGain();
-    osc.type = "sine";
-    var base = 520 + pitch * 480;
-    osc.frequency.setValueAtTime(base, now);
-    osc.frequency.exponentialRampToValueAtTime(base * 0.35, now + 0.12);
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.5, now + 0.008);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
-    osc.connect(gain); gain.connect(audioCtx.destination);
-    osc.start(now); osc.stop(now + 0.2);
-
-    // Tiny noise transient for the "pop" attack.
-    var dur = 0.05;
-    var buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * dur), audioCtx.sampleRate);
-    var data = buf.getChannelData(0);
-    for (var i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
-    var noise = audioCtx.createBufferSource();
-    noise.buffer = buf;
-    var ng = audioCtx.createGain();
-    ng.gain.setValueAtTime(0.35, now);
-    ng.gain.exponentialRampToValueAtTime(0.0001, now + dur);
-    noise.connect(ng); ng.connect(audioCtx.destination);
-    noise.start(now);
+    var n = Math.max(1, (audioCtx.sampleRate * dur) | 0);
+    var buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+    var d = buf.getChannelData(0);
+    for (var i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, shapePow || 1);
+    var src = audioCtx.createBufferSource(); src.buffer = buf;
+    var g = audioCtx.createGain();
+    g.gain.setValueAtTime(peak, now);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    src.connect(g); g.connect(audioCtx.destination); src.start(now);
   }
-  // Soft descending tone when a balloon escapes / life lost.
-  function playLoseLife() {
+  function playPop(pitch) { tone("sine", 520 + pitch * 480, (520 + pitch * 480) * 0.35, 0.18, 0.5); noise(0.05, 0.35, 1); }
+  function playLoseLife() { tone("triangle", 330, 120, 0.4, 0.3); }
+  function playBuzz() { tone("square", 150, 70, 0.25, 0.35); }
+  function playBoom() { tone("sine", 190, 50, 0.5, 0.5); noise(0.3, 0.4, 1); }
+  function playEngine() {
     if (!audioCtx) return;
-    var now = audioCtx.currentTime;
-    var osc = audioCtx.createOscillator();
-    var gain = audioCtx.createGain();
-    osc.type = "triangle";
-    osc.frequency.setValueAtTime(330, now);
-    osc.frequency.exponentialRampToValueAtTime(120, now + 0.35);
-    gain.gain.setValueAtTime(0.0001, now);
-    gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
-    osc.connect(gain); gain.connect(audioCtx.destination);
-    osc.start(now); osc.stop(now + 0.42);
+    var now = audioCtx.currentTime, o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = "sawtooth"; o.frequency.setValueAtTime(80, now); o.frequency.linearRampToValueAtTime(120, now + 0.6);
+    g.gain.setValueAtTime(0.0001, now); g.gain.linearRampToValueAtTime(0.12, now + 0.1); g.gain.linearRampToValueAtTime(0.0001, now + 0.7);
+    o.connect(g); g.connect(audioCtx.destination); o.start(now); o.stop(now + 0.72);
   }
+  function playCollect() {
+    [523, 659, 784, 1047].forEach(function (f, i) { tone("triangle", f, f, 0.18, 0.3, i * 0.06); });
+  }
+  function playThunder() { noise(0.9, 0.5, 1.5); tone("sine", 60, 35, 0.9, 0.4); }
 
-  // ---------- Game state ----------
-  var STATE = { START: 0, PLAYING: 1, OVER: 2 };
-  var state = STATE.START;
-  var MAX_LIVES = 5;
-
-  var balloons = [];
-  var particles = [];
-  var floaters = []; // floating "+points" text
-  var score = 0;
-  var lives = MAX_LIVES;
-  var elapsed = 0;          // seconds since game start
-  var spawnTimer = 0;
-  var best = 0;
-
-  try { best = parseInt(localStorage.getItem("balloonPopBest") || "0", 10) || 0; } catch (e) { best = 0; }
-
-  var COLORS = [
-    { c: "#ff5a6e", h: "#ff97a4" }, // red
-    { c: "#ffb13d", h: "#ffd28a" }, // orange
-    { c: "#ffe14d", h: "#fff0a0" }, // yellow
-    { c: "#4fd97a", h: "#9deeb4" }, // green
-    { c: "#46c3ff", h: "#a3e3ff" }, // blue
-    { c: "#a36bff", h: "#cdaaff" }, // purple
-    { c: "#ff6fd0", h: "#ffb0e6" }  // pink
-  ];
-
-  function rand(a, b) { return a + Math.random() * (b - a); }
-  function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
-
-  // ---------- Balloon ----------
+  // ---------- Balloon spawn ----------
   function spawnBalloon() {
-    // Difficulty: shrink radius range and increase speed as time goes on.
-    var diff = Math.min(elapsed / 75, 1); // 0..1 over ~75s
-    var minR = 30 - 8 * diff;
-    var maxR = 64 - 22 * diff;
-    var r = rand(minR, maxR);
-    var baseSpeed = rand(50, 85) + diff * 90;     // px/sec upward
-    var speed = baseSpeed * (1 + (64 - r) / 64 * 0.4); // smaller = faster
-
+    var diff = Math.min(elapsed / 75, 1);
+    var spiky = level >= 2 && Math.random() < 0.22;
+    var r = spiky ? rand(26, 40) : rand(30 - 8 * diff, 64 - 22 * diff);
+    var baseSpeed = rand(50, 85) + diff * 90;
+    var speed = baseSpeed * (1 + (64 - r) / 64 * 0.4);
+    if (spiky) speed *= 0.9;
     var col = choice(COLORS);
-    var x = rand(r + 10, W - r - 10);
+    var x = rand(r + 10, Math.max(r + 11, W - r - 10));
     balloons.push({
-      x: x, y: H + r + 20,
-      r: r, baseX: x,
-      vy: speed,
-      driftAmp: rand(18, 52),
-      driftSpeed: rand(0.5, 1.4),
-      phase: rand(0, Math.PI * 2),
-      bobPhase: rand(0, Math.PI * 2),
-      color: col.c, hi: col.h,
-      sway: rand(-0.12, 0.12)
+      type: spiky ? "spiky" : "normal",
+      x: x, y: H + r + 20, r: r, baseX: x, vy: speed,
+      driftAmp: rand(18, 52), driftSpeed: rand(0.5, 1.4),
+      phase: rand(0, TAU), bobPhase: rand(0, TAU),
+      color: col.c, hi: col.h, sway: rand(-0.12, 0.12)
     });
   }
-
   function balloonPoints(b) {
-    // Smaller + faster => more points. Range roughly 5..50.
-    var sizeScore = (70 - b.r) / 50;          // ~0..0.8
-    var speedScore = (b.vy - 50) / 180;       // ~0..1+
-    var pts = 5 + Math.round((sizeScore * 0.6 + speedScore * 0.4) * 45);
-    return Math.max(5, Math.min(50, pts));
+    var sizeScore = (70 - b.r) / 50;
+    var speedScore = (b.vy - 50) / 180;
+    return clamp(5 + Math.round((sizeScore * 0.6 + speedScore * 0.4) * 45), 5, 50);
   }
 
   // ---------- Effects ----------
   function burst(x, y, color, n) {
     for (var i = 0; i < n; i++) {
-      var ang = rand(0, Math.PI * 2);
-      var spd = rand(60, 320);
-      particles.push({
-        x: x, y: y,
-        vx: Math.cos(ang) * spd,
-        vy: Math.sin(ang) * spd - 40,
-        life: rand(0.4, 0.8), age: 0,
-        r: rand(3, 7), color: color
-      });
+      var a = rand(0, TAU), s = rand(60, 320);
+      particles.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 40, life: rand(0.4, 0.8), age: 0, r: rand(3, 7), color: color });
     }
   }
-  function addFloater(x, y, text, color) {
-    floaters.push({ x: x, y: y, text: text, color: color, age: 0, life: 0.9 });
+  function addFloater(x, y, text, color) { floaters.push({ x: x, y: y, text: text, color: color, age: 0, life: 0.9 }); }
+  function showBanner(text, sub) { banner = { text: text, sub: sub || "", age: 0, life: 2.6 }; }
+  function initRain() {
+    rain = [];
+    var n = Math.min(220, Math.round(W * H / 8500));
+    for (var i = 0; i < n; i++) rain.push({ x: rand(0, W), y: rand(-H, H), len: rand(10, 22), spd: rand(750, 1150) });
   }
 
-  // ---------- Game flow ----------
+  // ---------- Flow ----------
   function startGame() {
     ensureAudio();
-    balloons.length = 0; particles.length = 0; floaters.length = 0;
+    balloons.length = particles.length = floaters.length = powerups.length = planes.length = rings.length = 0;
+    bolt = null;
     score = 0; lives = MAX_LIVES; elapsed = 0; spawnTimer = 0;
+    level = 1; blastTimer = 0; flashRed = 0; lightning = 0; shake = 0;
+    powerTimer = 7;
     state = STATE.PLAYING;
+    buildSky();
     document.getElementById("start").classList.add("hidden");
     document.getElementById("gameover").classList.add("hidden");
+    showBanner("🎈 Level 1", "Pop the balloons!");
     updateHUD();
   }
-
+  function setLevel2() {
+    level = 2; buildSky(); initRain();
+    lightningTimer = rand(1.5, 3.5);
+    showBanner("⛈️ Level 2", "Storm! Avoid the spiky mines");
+    playThunder(); shake = Math.max(shake, 8);
+    updateHUD();
+  }
   function gameOver() {
-    state = STATE.OVER;
-    playLoseLife();
+    state = STATE.OVER; playLoseLife();
     var newBest = false;
     if (score > best) { best = score; newBest = true; try { localStorage.setItem("balloonPopBest", String(best)); } catch (e) {} }
     document.getElementById("final-score").textContent = score;
@@ -284,51 +293,83 @@
     document.getElementById("new-best").classList.toggle("hidden", !newBest);
     document.getElementById("gameover").classList.remove("hidden");
   }
-
   function loseLife() {
-    lives--;
-    playLoseLife();
-    updateHUD();
-    flashRed = 0.4;
+    lives--; playLoseLife(); updateHUD();
+    flashRed = 0.4; shake = Math.max(shake, 6);
     if (lives <= 0) gameOver();
   }
-
-  var flashRed = 0;
-
   function updateHUD() {
     document.getElementById("score").textContent = score;
     var hearts = "";
     for (var i = 0; i < MAX_LIVES; i++) hearts += i < lives ? "❤️" : "🤍";
     document.getElementById("lives").textContent = hearts;
+    document.getElementById("levelchip").textContent = level >= 2 ? "⛈️ Lv 2" : "☀️ Lv 1";
+  }
+
+  // ---------- Power-ups ----------
+  function collectPowerup(pu) {
+    playCollect(); shake = Math.max(shake, 6);
+    if (pu.type === "plane") { spawnPlane(); playEngine(); addFloater(pu.x, pu.y, "✈️ GO!", "#bfe3ff"); }
+    else { blastTimer = 5; addFloater(pu.x, pu.y, "💥 BLAST!", "#ffd28a"); }
+  }
+  function spawnPlane() {
+    var dir = Math.random() < 0.5 ? 1 : -1;
+    var size = Math.max(46, Math.min(W, H) * 0.09);
+    var y = rand(H * 0.16, H * 0.6);
+    var x = dir > 0 ? -size * 2.2 : W + size * 2.2;
+    var speed = (W + size * 4.4) / 4.2;
+    planes.push({ x: x, y: y, vx: dir * speed, size: size, dir: dir });
+  }
+  function doBlast(px, py) {
+    var R = Math.max(120, Math.min(W, H) * 0.2);
+    rings.push({ x: px, y: py, r: 10, max: R, age: 0, life: 0.5 });
+    playBoom(); shake = Math.max(shake, 10);
+    var total = 0;
+    for (var i = balloons.length - 1; i >= 0; i--) {
+      var b = balloons[i], dx = px - b.x, dy = py - b.y;
+      if (dx * dx + dy * dy <= (R + b.r) * (R + b.r)) {
+        if (b.type === "spiky") burst(b.x, b.y, "#6b7280", 14);
+        else { total += balloonPoints(b); burst(b.x, b.y, b.color, 14); }
+        balloons.splice(i, 1);
+      }
+    }
+    if (total > 0) { score += total; addFloater(px, py - 24, "+" + total, "#fff3b0"); }
+    updateHUD();
+  }
+  function popSpiky(b) {
+    var pen = 30; score = Math.max(0, score - pen);
+    burst(b.x, b.y, "#6b7280", 16);
+    addFloater(b.x, b.y - b.r * 0.4, "-" + pen, "#ff6b6b");
+    playBuzz(); shake = Math.max(shake, 12); flashRed = Math.max(flashRed, 0.25);
+    updateHUD();
   }
 
   // ---------- Input ----------
   function handleTap(px, py) {
     ensureAudio();
     if (state !== STATE.PLAYING) return;
-    // Topmost (last drawn) first — iterate from end.
-    for (var i = balloons.length - 1; i >= 0; i--) {
-      var b = balloons[i];
-      var dx = px - b.x, dy = py - b.y;
-      var hitR = b.r + 14; // generous, finger-friendly
-      if (dx * dx + dy * dy <= hitR * hitR) {
-        var pts = balloonPoints(b);
-        score += pts;
-        burst(b.x, b.y, b.color, 18);
-        addFloater(b.x, b.y - b.r * 0.4, "+" + pts, b.hi);
-        playPop(Math.min(1, (70 - b.r) / 50));
-        balloons.splice(i, 1);
-        updateHUD();
+    // 1. power-up tokens
+    for (var i = powerups.length - 1; i >= 0; i--) {
+      var pu = powerups[i], dx = px - pu.x, dy = py - pu.y, hr = pu.r + 18;
+      if (dx * dx + dy * dy <= hr * hr) { collectPowerup(pu); powerups.splice(i, 1); return; }
+    }
+    // 2. blast mode
+    if (blastTimer > 0) { doBlast(px, py); return; }
+    // 3. normal balloon tap (topmost first)
+    for (var j = balloons.length - 1; j >= 0; j--) {
+      var b = balloons[j], ddx = px - b.x, ddy = py - b.y, h = b.r + 14;
+      if (ddx * ddx + ddy * ddy <= h * h) {
+        if (b.type === "spiky") { popSpiky(b); balloons.splice(j, 1); }
+        else {
+          var pts = balloonPoints(b); score += pts;
+          burst(b.x, b.y, b.color, 18); addFloater(b.x, b.y - b.r * 0.4, "+" + pts, b.hi);
+          playPop(Math.min(1, (70 - b.r) / 50)); balloons.splice(j, 1); updateHUD();
+        }
         return;
       }
     }
   }
-
-  canvas.addEventListener("pointerdown", function (e) {
-    e.preventDefault();
-    handleTap(e.clientX, e.clientY);
-  }, { passive: false });
-
+  canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); handleTap(e.clientX, e.clientY); }, { passive: false });
   document.getElementById("start-btn").addEventListener("click", startGame);
   document.getElementById("restart-btn").addEventListener("click", startGame);
 
@@ -336,196 +377,313 @@
   function update(dt) {
     if (state === STATE.PLAYING) {
       elapsed += dt;
+      if (level === 1 && score >= LEVEL2_SCORE) setLevel2();
 
-      // Spawn cadence ramps up in escalating waves.
+      // spawn balloons (waves)
       var diff = Math.min(elapsed / 75, 1);
-      var interval = 1.5 - 1.0 * diff;                 // 1.5s -> 0.5s
-      var wave = 0.25 * Math.sin(elapsed * 0.35);      // gentle ebb & flow
-      interval = Math.max(0.32, interval + wave * (1 - diff * 0.5));
+      var interval = 1.5 - 1.0 * diff;
+      interval = Math.max(0.32, interval + 0.25 * Math.sin(elapsed * 0.35) * (1 - diff * 0.5));
       spawnTimer -= dt;
       if (spawnTimer <= 0) {
         spawnBalloon();
-        // occasional double spawn at higher difficulty
         if (Math.random() < diff * 0.4) spawnBalloon();
         spawnTimer = interval;
       }
 
-      // Balloons
-      for (var i = balloons.length - 1; i >= 0; i--) {
-        var b = balloons[i];
-        b.phase += dt * b.driftSpeed;
-        b.bobPhase += dt * 3;
-        b.y -= b.vy * dt;
-        b.x = b.baseX + Math.sin(b.phase) * b.driftAmp;
-        b.baseX += b.sway * b.vy * dt * 0.2;
-        // keep within walls
-        if (b.x < b.r) b.x = b.r;
-        if (b.x > W - b.r) b.x = W - b.r;
-        // escaped top
-        if (b.y + b.r < 0) {
-          balloons.splice(i, 1);
-          loseLife();
+      // spawn power-ups
+      powerTimer -= dt;
+      if (powerTimer <= 0 && powerups.length === 0) {
+        var type = Math.random() < 0.5 ? "plane" : "blast";
+        var bx = rand(80, Math.max(81, W - 80));
+        powerups.push({ x: bx, baseX: bx, y: H + 60, vy: rand(40, 60), r: 34, type: type, phase: rand(0, TAU) });
+        powerTimer = rand(11, 18);
+      }
+
+      // storm
+      if (level >= 2) {
+        lightningTimer -= dt;
+        if (lightningTimer <= 0) {
+          bolt = makeBolt(); lightning = 1; playThunder();
+          lightningTimer = rand(5, 11);
         }
       }
     }
 
-    // Particles (always update so bursts finish)
-    for (var p = particles.length - 1; p >= 0; p--) {
-      var pt = particles[p];
-      pt.age += dt;
-      if (pt.age >= pt.life) { particles.splice(p, 1); continue; }
-      pt.vy += 520 * dt; // gravity
-      pt.x += pt.vx * dt;
-      pt.y += pt.vy * dt;
+    // balloons
+    for (var i = balloons.length - 1; i >= 0; i--) {
+      var b = balloons[i];
+      b.phase += dt * b.driftSpeed; b.bobPhase += dt * 3;
+      b.y -= b.vy * dt;
+      b.baseX += b.sway * b.vy * dt * 0.2;
+      b.x = clamp(b.baseX + Math.sin(b.phase) * b.driftAmp, b.r, W - b.r);
+      if (b.y + b.r < 0) {
+        balloons.splice(i, 1);
+        if (b.type === "normal" && state === STATE.PLAYING) loseLife();
+      }
     }
-    // Floaters
+
+    // power-up tokens
+    for (var p = powerups.length - 1; p >= 0; p--) {
+      var pu = powerups[p]; pu.phase += dt * 2; pu.y -= pu.vy * dt;
+      pu.x = pu.baseX + Math.sin(pu.phase) * 16;
+      if (pu.y < -60) powerups.splice(p, 1);
+    }
+
+    // planes (strafe balloons)
+    for (var pl = planes.length - 1; pl >= 0; pl--) {
+      var P = planes[pl]; P.x += P.vx * dt;
+      for (var k = balloons.length - 1; k >= 0; k--) {
+        var bb = balloons[k], dx = P.x - bb.x, dy = P.y - bb.y, hr = P.size * 0.85 + bb.r;
+        if (dx * dx + dy * dy <= hr * hr) {
+          if (bb.type === "spiky") burst(bb.x, bb.y, "#6b7280", 12);
+          else { score += balloonPoints(bb); burst(bb.x, bb.y, bb.color, 12); }
+          balloons.splice(k, 1); updateHUD();
+        }
+      }
+      if ((P.dir > 0 && P.x > W + P.size * 2.6) || (P.dir < 0 && P.x < -P.size * 2.6)) planes.splice(pl, 1);
+    }
+
+    // blast timer / HUD chip
+    if (blastTimer > 0) { blastTimer = Math.max(0, blastTimer - dt); }
+    var bc = document.getElementById("blastchip");
+    if (blastTimer > 0) { bc.textContent = "💥 " + blastTimer.toFixed(1) + "s"; bc.classList.remove("hidden"); }
+    else bc.classList.add("hidden");
+
+    // rings
+    for (var r = rings.length - 1; r >= 0; r--) {
+      var R = rings[r]; R.age += dt;
+      if (R.age >= R.life) rings.splice(r, 1);
+    }
+
+    // particles
+    for (var q = particles.length - 1; q >= 0; q--) {
+      var pt = particles[q]; pt.age += dt;
+      if (pt.age >= pt.life) { particles.splice(q, 1); continue; }
+      pt.vy += 520 * dt; pt.x += pt.vx * dt; pt.y += pt.vy * dt;
+    }
+    // floaters
     for (var f = floaters.length - 1; f >= 0; f--) {
-      var fl = floaters[f];
-      fl.age += dt;
+      var fl = floaters[f]; fl.age += dt;
       if (fl.age >= fl.life) { floaters.splice(f, 1); continue; }
       fl.y -= 60 * dt;
     }
+    // rain
+    if (level >= 2) {
+      for (var d = 0; d < rain.length; d++) {
+        var rd = rain[d]; rd.y += rd.spd * dt; rd.x -= rd.spd * 0.12 * dt;
+        if (rd.y > H) { rd.y = -20; rd.x = rand(0, W); }
+        if (rd.x < 0) rd.x += W;
+      }
+    }
 
+    if (banner) { banner.age += dt; if (banner.age >= banner.life) banner = null; }
+    if (bolt) { bolt.life -= dt; if (bolt.life <= 0) bolt = null; }
+    if (lightning > 0) lightning = Math.max(0, lightning - dt * 4);
     if (flashRed > 0) flashRed = Math.max(0, flashRed - dt);
+    if (shake > 0) shake = Math.max(0, shake - dt * 40);
   }
 
-  // ---------- Draw ----------
-  function drawBalloon(b) {
-    var bob = Math.sin(b.bobPhase) * 1.5;
-    var x = b.x, y = b.y + bob, r = b.r;
-
-    // String
-    ctx.beginPath();
-    ctx.moveTo(x, y + r * 0.95);
-    ctx.quadraticCurveTo(x + Math.sin(b.phase * 2) * 6, y + r * 1.5, x, y + r * 2.1);
-    ctx.strokeStyle = "rgba(255,255,255,0.55)";
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-
-    // Body (slightly egg-shaped)
-    var grad = ctx.createRadialGradient(x - r * 0.35, y - r * 0.45, r * 0.1, x, y, r * 1.15);
-    grad.addColorStop(0, b.hi);
-    grad.addColorStop(0.5, b.color);
-    grad.addColorStop(1, shade(b.color, -0.18));
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.ellipse(x, y, r * 0.92, r, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    // Knot
-    ctx.fillStyle = shade(b.color, -0.2);
-    ctx.beginPath();
-    ctx.moveTo(x - r * 0.12, y + r * 0.96);
-    ctx.lineTo(x + r * 0.12, y + r * 0.96);
-    ctx.lineTo(x, y + r * 1.12);
-    ctx.closePath();
-    ctx.fill();
-
-    // Highlight glint
-    ctx.fillStyle = "rgba(255,255,255,0.45)";
-    ctx.beginPath();
-    ctx.ellipse(x - r * 0.32, y - r * 0.38, r * 0.18, r * 0.3, -0.5, 0, Math.PI * 2);
-    ctx.fill();
+  function makeBolt() {
+    var pts = [], x = rand(W * 0.2, W * 0.8), y = 0;
+    pts.push({ x: x, y: y });
+    while (y < H * 0.62) { y += rand(20, 50); x += rand(-34, 34); pts.push({ x: x, y: y }); }
+    return { pts: pts, life: 0.2 };
   }
 
-  // lighten/darken a hex colour
+  // ---------- Draw helpers ----------
   function shade(hex, amt) {
-    var n = parseInt(hex.slice(1), 16);
-    var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
-    r = Math.max(0, Math.min(255, Math.round(r + r * amt)));
-    g = Math.max(0, Math.min(255, Math.round(g + g * amt)));
-    b = Math.max(0, Math.min(255, Math.round(b + b * amt)));
+    var n = parseInt(hex.slice(1), 16), r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    r = clamp(Math.round(r + r * amt), 0, 255); g = clamp(Math.round(g + g * amt), 0, 255); b = clamp(Math.round(b + b * amt), 0, 255);
     return "rgb(" + r + "," + g + "," + b + ")";
   }
-
+  function drawBalloon(b) {
+    var bob = Math.sin(b.bobPhase) * 1.5, x = b.x, y = b.y + bob, r = b.r;
+    ctx.beginPath(); ctx.moveTo(x, y + r * 0.95);
+    ctx.quadraticCurveTo(x + Math.sin(b.phase * 2) * 6, y + r * 1.5, x, y + r * 2.1);
+    ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.lineWidth = 1.5; ctx.stroke();
+    var grad = ctx.createRadialGradient(x - r * 0.35, y - r * 0.45, r * 0.1, x, y, r * 1.15);
+    grad.addColorStop(0, b.hi); grad.addColorStop(0.5, b.color); grad.addColorStop(1, shade(b.color, -0.18));
+    ctx.fillStyle = grad; ctx.beginPath(); ctx.ellipse(x, y, r * 0.92, r, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = shade(b.color, -0.2); ctx.beginPath();
+    ctx.moveTo(x - r * 0.12, y + r * 0.96); ctx.lineTo(x + r * 0.12, y + r * 0.96); ctx.lineTo(x, y + r * 1.12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.45)"; ctx.beginPath();
+    ctx.ellipse(x - r * 0.32, y - r * 0.38, r * 0.18, r * 0.3, -0.5, 0, TAU); ctx.fill();
+  }
+  function drawSpiky(b) {
+    var bob = Math.sin(b.bobPhase) * 1.5, x = b.x, y = b.y + bob, r = b.r;
+    var pulse = 0.5 + 0.5 * Math.sin(b.bobPhase * 1.5);
+    ctx.save();
+    ctx.globalAlpha = 0.22 + 0.2 * pulse; ctx.fillStyle = "#ff3b3b";
+    ctx.beginPath(); ctx.arc(x, y, r * 1.55, 0, TAU); ctx.fill(); ctx.globalAlpha = 1;
+    ctx.fillStyle = "#23262f";
+    var spikes = 11;
+    for (var i = 0; i < spikes; i++) {
+      var a = i / spikes * TAU + b.bobPhase * 0.2;
+      ctx.beginPath();
+      ctx.moveTo(x + Math.cos(a - 0.16) * r * 0.9, y + Math.sin(a - 0.16) * r * 0.9);
+      ctx.lineTo(x + Math.cos(a) * r * 1.45, y + Math.sin(a) * r * 1.45);
+      ctx.lineTo(x + Math.cos(a + 0.16) * r * 0.9, y + Math.sin(a + 0.16) * r * 0.9);
+      ctx.closePath(); ctx.fill();
+    }
+    var g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.1, x, y, r);
+    g.addColorStop(0, "#5a6172"); g.addColorStop(0.6, "#3a3f4a"); g.addColorStop(1, "#1d2129");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r * 0.95, 0, TAU); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,0.22)"; ctx.beginPath();
+    ctx.ellipse(x - r * 0.3, y - r * 0.35, r * 0.18, r * 0.28, -0.5, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  function drawPowerup(pu) {
+    var y = pu.y + Math.sin(pu.phase) * 3, x = pu.x, r = pu.r;
+    var pulse = 0.5 + 0.5 * Math.sin(pu.phase * 2);
+    ctx.save();
+    ctx.globalAlpha = 0.3 + 0.3 * pulse;
+    ctx.fillStyle = pu.type === "plane" ? "#bfe3ff" : "#ffd28a";
+    ctx.beginPath(); ctx.arc(x, y, r + 10 + pulse * 6, 0, TAU); ctx.fill();
+    ctx.globalAlpha = 1;
+    var g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.2, x, y, r);
+    if (pu.type === "plane") { g.addColorStop(0, "#eaf6ff"); g.addColorStop(1, "#5bb6ef"); }
+    else { g.addColorStop(0, "#fff0c2"); g.addColorStop(1, "#ff9a3d"); }
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+    ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.stroke();
+    ctx.font = (r * 1.1 | 0) + "px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(pu.type === "plane" ? "✈️" : "💥", x, y + 2);
+    ctx.restore();
+  }
+  function drawPlane(P) {
+    var s = P.size;
+    ctx.save(); ctx.translate(P.x, P.y); ctx.scale(P.dir, 1);
+    ctx.fillStyle = "#eef3f8"; ctx.beginPath(); ctx.ellipse(0, 0, s * 1.0, s * 0.42, 0, 0, TAU); ctx.fill();
+    ctx.fillStyle = "#d8e2ec"; ctx.beginPath();
+    ctx.moveTo(s * 0.9, -s * 0.28); ctx.lineTo(s * 1.35, 0); ctx.lineTo(s * 0.9, s * 0.28); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#c0ccd8";
+    ctx.beginPath(); ctx.moveTo(-s * 0.1, 0); ctx.lineTo(-s * 0.6, s * 0.7); ctx.lineTo(s * 0.2, s * 0.1); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-s * 0.1, 0); ctx.lineTo(-s * 0.6, -s * 0.7); ctx.lineTo(s * 0.2, -s * 0.1); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(-s * 0.85, 0); ctx.lineTo(-s * 1.15, -s * 0.5); ctx.lineTo(-s * 0.65, -s * 0.05); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#5bb6ef"; ctx.beginPath(); ctx.ellipse(s * 0.35, -s * 0.05, s * 0.28, s * 0.16, 0, 0, TAU); ctx.fill();
+    ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = s * 0.1; ctx.beginPath(); ctx.moveTo(-s * 0.7, s * 0.05); ctx.lineTo(s * 0.8, s * 0.05); ctx.stroke();
+    ctx.restore();
+  }
   var cloudOffset = 0;
   function drawClouds() {
     cloudOffset += 0.15;
     ctx.save();
-    ctx.globalAlpha = 0.5;
-    ctx.fillStyle = "#ffffff";
-    var positions = [
-      { x: (W * 0.2 - cloudOffset * 0.3) , y: H * 0.18, s: 1.0 },
-      { x: (W * 0.7 - cloudOffset * 0.2) , y: H * 0.30, s: 1.4 },
-      { x: (W * 0.45 - cloudOffset * 0.15), y: H * 0.5, s: 0.8 }
+    var dark = level >= 2;
+    ctx.globalAlpha = dark ? 0.7 : 0.5;
+    ctx.fillStyle = dark ? "#39435a" : "#ffffff";
+    var defs = [
+      { x: W * 0.2 - cloudOffset * 0.3, y: H * 0.16, s: 1.0 },
+      { x: W * 0.7 - cloudOffset * 0.2, y: H * 0.28, s: 1.4 },
+      { x: W * 0.45 - cloudOffset * 0.15, y: H * 0.46, s: 0.85 }
     ];
-    for (var i = 0; i < positions.length; i++) {
-      var c = positions[i];
+    if (dark) defs.push({ x: W * 0.9 - cloudOffset * 0.25, y: H * 0.12, s: 1.2 }, { x: W * 0.1 - cloudOffset * 0.18, y: H * 0.36, s: 1.1 });
+    for (var i = 0; i < defs.length; i++) {
+      var c = defs[i];
       var cx = ((c.x % (W + 300)) + (W + 300)) % (W + 300) - 150;
-      var s = c.s * (Math.min(W, H) / 700);
-      puff(cx, c.y, 55 * s);
+      puff(cx, c.y, 55 * c.s * (Math.min(W, H) / 700));
     }
     ctx.restore();
   }
   function puff(x, y, r) {
     ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.arc(x + r * 0.9, y + r * 0.15, r * 0.75, 0, Math.PI * 2);
-    ctx.arc(x - r * 0.9, y + r * 0.18, r * 0.7, 0, Math.PI * 2);
-    ctx.arc(x + r * 0.35, y - r * 0.5, r * 0.65, 0, Math.PI * 2);
+    ctx.arc(x, y, r, 0, TAU); ctx.arc(x + r * 0.9, y + r * 0.15, r * 0.75, 0, TAU);
+    ctx.arc(x - r * 0.9, y + r * 0.18, r * 0.7, 0, TAU); ctx.arc(x + r * 0.35, y - r * 0.5, r * 0.65, 0, TAU);
     ctx.fill();
   }
+  function drawRain() {
+    ctx.save(); ctx.strokeStyle = "rgba(200,220,255,0.35)"; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (var i = 0; i < rain.length; i++) {
+      var d = rain[i]; ctx.moveTo(d.x, d.y); ctx.lineTo(d.x - d.len * 0.2, d.y + d.len);
+    }
+    ctx.stroke(); ctx.restore();
+  }
+  function drawBanner() {
+    if (!banner) return;
+    var t = banner.age / banner.life;
+    var alpha = t < 0.15 ? t / 0.15 : t > 0.7 ? (1 - t) / 0.3 : 1;
+    alpha = clamp(alpha, 0, 1);
+    ctx.save(); ctx.globalAlpha = alpha; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    var cx = W / 2, cy = H * 0.4, fs = Math.min(W, H) * 0.11;
+    ctx.font = "900 " + fs + "px -apple-system, Segoe UI, Roboto, sans-serif";
+    ctx.lineWidth = fs * 0.12; ctx.strokeStyle = "rgba(0,0,0,0.35)"; ctx.strokeText(banner.text, cx, cy);
+    ctx.fillStyle = "#fff"; ctx.fillText(banner.text, cx, cy);
+    if (banner.sub) {
+      var fs2 = Math.min(W, H) * 0.04;
+      ctx.font = "700 " + fs2 + "px -apple-system, Segoe UI, Roboto, sans-serif";
+      ctx.lineWidth = fs2 * 0.14; ctx.strokeStyle = "rgba(0,0,0,0.35)"; ctx.strokeText(banner.sub, cx, cy + fs * 0.78);
+      ctx.fillStyle = "#ffe14d"; ctx.fillText(banner.sub, cx, cy + fs * 0.78);
+    }
+    ctx.restore();
+  }
 
+  // ---------- Draw ----------
   function draw() {
-    // Sky
-    ctx.fillStyle = skyGrad;
-    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = skyGrad; ctx.fillRect(0, 0, W, H);
+
+    var sx = 0, sy = 0;
+    if (shake > 0) { sx = rand(-1, 1) * shake; sy = rand(-1, 1) * shake; }
+    ctx.save(); ctx.translate(sx, sy);
+
     drawClouds();
+    if (level >= 2) drawRain();
 
-    // Balloons
-    for (var i = 0; i < balloons.length; i++) drawBalloon(balloons[i]);
+    for (var u = 0; u < powerups.length; u++) drawPowerup(powerups[u]);
+    for (var i = 0; i < balloons.length; i++) (balloons[i].type === "spiky" ? drawSpiky : drawBalloon)(balloons[i]);
+    for (var pl = 0; pl < planes.length; pl++) drawPlane(planes[pl]);
 
-    // Particles
+    for (var rg = 0; rg < rings.length; rg++) {
+      var R = rings[rg], tt = R.age / R.life;
+      ctx.globalAlpha = (1 - tt) * 0.8;
+      ctx.strokeStyle = "#ffd84a"; ctx.lineWidth = 6 * (1 - tt) + 2;
+      ctx.beginPath(); ctx.arc(R.x, R.y, R.max * tt, 0, TAU); ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
     for (var p = 0; p < particles.length; p++) {
       var pt = particles[p];
       ctx.globalAlpha = Math.max(0, 1 - pt.age / pt.life);
-      ctx.fillStyle = pt.color;
-      ctx.beginPath();
-      ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fillStyle = pt.color; ctx.beginPath(); ctx.arc(pt.x, pt.y, pt.r, 0, TAU); ctx.fill();
     }
     ctx.globalAlpha = 1;
 
-    // Floaters
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
     for (var f = 0; f < floaters.length; f++) {
-      var fl = floaters[f];
-      var t = fl.age / fl.life;
+      var fl = floaters[f], t = fl.age / fl.life;
       ctx.globalAlpha = Math.max(0, 1 - t);
-      var fs = Math.round(Math.min(W, H) * 0.045) + 8;
-      ctx.font = "900 " + fs + "px -apple-system, Segoe UI, Roboto, sans-serif";
-      ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.25)";
-      ctx.strokeText(fl.text, fl.x, fl.y);
-      ctx.fillStyle = fl.color;
-      ctx.fillText(fl.text, fl.x, fl.y);
+      var fz = Math.round(Math.min(W, H) * 0.045) + 8;
+      ctx.font = "900 " + fz + "px -apple-system, Segoe UI, Roboto, sans-serif";
+      ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.strokeText(fl.text, fl.x, fl.y);
+      ctx.fillStyle = fl.color; ctx.fillText(fl.text, fl.x, fl.y);
     }
     ctx.globalAlpha = 1;
 
-    // Damage flash
-    if (flashRed > 0) {
-      ctx.fillStyle = "rgba(255,40,40," + (flashRed * 0.5) + ")";
-      ctx.fillRect(0, 0, W, H);
+    ctx.restore(); // end shake
+
+    // full-screen overlays
+    if (bolt) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.95)"; ctx.lineWidth = 5; ctx.lineJoin = "round";
+      ctx.shadowColor = "#cfe3ff"; ctx.shadowBlur = 24;
+      ctx.beginPath(); ctx.moveTo(bolt.pts[0].x, bolt.pts[0].y);
+      for (var bp = 1; bp < bolt.pts.length; bp++) ctx.lineTo(bolt.pts[bp].x, bolt.pts[bp].y);
+      ctx.stroke(); ctx.restore();
     }
+    if (lightning > 0) { ctx.fillStyle = "rgba(220,235,255," + (lightning * 0.5) + ")"; ctx.fillRect(0, 0, W, H); }
+    if (flashRed > 0) { ctx.fillStyle = "rgba(255,40,40," + (flashRed * 0.5) + ")"; ctx.fillRect(0, 0, W, H); }
+    drawBanner();
   }
 
-  // ---------- Main loop ----------
+  // ---------- Loop ----------
   var lastTime = 0;
   function loop(ts) {
     if (!lastTime) lastTime = ts;
-    var dt = (ts - lastTime) / 1000;
-    lastTime = ts;
-    if (dt > 0.05) dt = 0.05; // clamp big gaps (tab switch)
-
-    update(dt);
-    draw();
+    var dt = (ts - lastTime) / 1000; lastTime = ts;
+    if (dt > 0.05) dt = 0.05;
+    update(dt); draw();
     requestAnimationFrame(loop);
   }
 
-  // ---------- Boot ----------
-  resize();
-  updateHUD();
-  requestAnimationFrame(loop);
+  resize(); updateHUD(); requestAnimationFrame(loop);
 })();
 </script>
 </body>
