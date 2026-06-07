@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="theme-color" content="#4a90d9" />
+<title>Balloon Pop</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background: #1b2a4a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+  }
+  #game { position: fixed; inset: 0; display: block; touch-action: none; }
+
+  /* HUD */
+  #hud {
+    position: fixed; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: center;
+    padding: max(14px, env(safe-area-inset-top)) 22px 14px 22px;
+    pointer-events: none; z-index: 5;
+  }
+  .hud-chip {
+    background: rgba(15, 30, 60, 0.32);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    border-radius: 18px; padding: 8px 18px;
+    color: #fff; font-weight: 800;
+    text-shadow: 0 2px 4px rgba(0,0,0,0.25);
+    display: flex; align-items: center; gap: 8px;
+    font-size: clamp(18px, 3.6vmin, 30px);
+    line-height: 1;
+  }
+  #score-label { font-size: 0.62em; opacity: 0.8; font-weight: 700; letter-spacing: 0.5px; }
+  #lives { letter-spacing: 2px; }
+
+  /* Overlays */
+  .overlay {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; color: #fff; padding: 24px;
+    background: radial-gradient(circle at 50% 35%, rgba(30,55,105,0.55), rgba(12,22,45,0.85));
+    backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px);
+  }
+  .overlay.hidden { display: none; }
+  .overlay h1 {
+    font-size: clamp(40px, 11vmin, 96px); font-weight: 900;
+    letter-spacing: -1px; text-shadow: 0 4px 16px rgba(0,0,0,0.35);
+    margin-bottom: 6px;
+  }
+  .overlay .sub { font-size: clamp(16px, 3.4vmin, 26px); opacity: 0.9; margin-bottom: 8px; font-weight: 600; }
+  .scores { margin: 18px 0 30px; line-height: 1.5; }
+  .scores .big { font-size: clamp(30px, 7vmin, 60px); font-weight: 900; }
+  .scores .best { font-size: clamp(16px, 3.4vmin, 26px); opacity: 0.85; font-weight: 700; }
+  .btn {
+    pointer-events: auto; cursor: pointer; border: none;
+    background: linear-gradient(180deg, #ffd84a, #ff9a3d);
+    color: #5a2d00; font-weight: 900;
+    font-size: clamp(20px, 4.4vmin, 34px);
+    padding: 18px 46px; border-radius: 999px;
+    box-shadow: 0 8px 0 #c96a16, 0 14px 24px rgba(0,0,0,0.3);
+    transition: transform 0.06s ease, box-shadow 0.06s ease;
+    font-family: inherit;
+  }
+  .btn:active { transform: translateY(5px); box-shadow: 0 3px 0 #c96a16, 0 6px 12px rgba(0,0,0,0.3); }
+  .hint { margin-top: 22px; font-size: clamp(14px, 2.8vmin, 20px); opacity: 0.7; max-width: 520px; }
+  .pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+</style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+
+  <div id="hud">
+    <div class="hud-chip">
+      <span id="score-label">SCORE</span>
+      <span id="score">0</span>
+    </div>
+    <div class="hud-chip" id="lives">❤️❤️❤️❤️❤️</div>
+  </div>
+
+  <div id="start" class="overlay">
+    <h1>🎈 Balloon Pop</h1>
+    <div class="sub">Tap the balloons before they float away!</div>
+    <button class="btn pulse" id="start-btn">Tap to Play</button>
+    <div class="hint">Smaller, faster balloons are worth more points. You have 5 lives — don't let them escape off the top!</div>
+  </div>
+
+  <div id="gameover" class="overlay hidden">
+    <h1>Game Over</h1>
+    <div class="scores">
+      <div class="big">Score: <span id="final-score">0</span></div>
+      <div class="best">Best: <span id="best-score">0</span> <span id="new-best" class="hidden">🏆 New Best!</span></div>
+    </div>
+    <button class="btn pulse" id="restart-btn">Tap to Play Again</button>
+  </div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Canvas setup ----------
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var W = 0, H = 0, DPR = 1;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    canvas.style.width = W + "px";
+    canvas.style.height = H + "px";
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    buildSky();
+  }
+  window.addEventListener("resize", resize);
+  window.addEventListener("orientationchange", function () { setTimeout(resize, 150); });
+
+  // ---------- Sky gradient (cached) ----------
+  var skyGrad = null;
+  function buildSky() {
+    skyGrad = ctx.createLinearGradient(0, 0, 0, H);
+    skyGrad.addColorStop(0, "#3a7bd5");
+    skyGrad.addColorStop(0.45, "#5e9fe0");
+    skyGrad.addColorStop(0.8, "#acd5f2");
+    skyGrad.addColorStop(1, "#dff1fb");
+  }
+
+  // ---------- Audio (Web Audio API) ----------
+  var audioCtx = null;
+  function ensureAudio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      catch (e) { audioCtx = null; }
+    }
+    if (audioCtx && audioCtx.state === "suspended") audioCtx.resume();
+  }
+  // A quick, satisfying synthesised "pop": short pitch-dropping blip + noise transient.
+  function playPop(pitch) {
+    if (!audioCtx) return;
+    var now = audioCtx.currentTime;
+    var osc = audioCtx.createOscillator();
+    var gain = audioCtx.createGain();
+    osc.type = "sine";
+    var base = 520 + pitch * 480;
+    osc.frequency.setValueAtTime(base, now);
+    osc.frequency.exponentialRampToValueAtTime(base * 0.35, now + 0.12);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.5, now + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.18);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(now); osc.stop(now + 0.2);
+
+    // Tiny noise transient for the "pop" attack.
+    var dur = 0.05;
+    var buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * dur), audioCtx.sampleRate);
+    var data = buf.getChannelData(0);
+    for (var i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    var noise = audioCtx.createBufferSource();
+    noise.buffer = buf;
+    var ng = audioCtx.createGain();
+    ng.gain.setValueAtTime(0.35, now);
+    ng.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+    noise.connect(ng); ng.connect(audioCtx.destination);
+    noise.start(now);
+  }
+  // Soft descending tone when a balloon escapes / life lost.
+  function playLoseLife() {
+    if (!audioCtx) return;
+    var now = audioCtx.currentTime;
+    var osc = audioCtx.createOscillator();
+    var gain = audioCtx.createGain();
+    osc.type = "triangle";
+    osc.frequency.setValueAtTime(330, now);
+    osc.frequency.exponentialRampToValueAtTime(120, now + 0.35);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.3, now + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.4);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(now); osc.stop(now + 0.42);
+  }
+
+  // ---------- Game state ----------
+  var STATE = { START: 0, PLAYING: 1, OVER: 2 };
+  var state = STATE.START;
+  var MAX_LIVES = 5;
+
+  var balloons = [];
+  var particles = [];
+  var floaters = []; // floating "+points" text
+  var score = 0;
+  var lives = MAX_LIVES;
+  var elapsed = 0;          // seconds since game start
+  var spawnTimer = 0;
+  var best = 0;
+
+  try { best = parseInt(localStorage.getItem("balloonPopBest") || "0", 10) || 0; } catch (e) { best = 0; }
+
+  var COLORS = [
+    { c: "#ff5a6e", h: "#ff97a4" }, // red
+    { c: "#ffb13d", h: "#ffd28a" }, // orange
+    { c: "#ffe14d", h: "#fff0a0" }, // yellow
+    { c: "#4fd97a", h: "#9deeb4" }, // green
+    { c: "#46c3ff", h: "#a3e3ff" }, // blue
+    { c: "#a36bff", h: "#cdaaff" }, // purple
+    { c: "#ff6fd0", h: "#ffb0e6" }  // pink
+  ];
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function choice(arr) { return arr[(Math.random() * arr.length) | 0]; }
+
+  // ---------- Balloon ----------
+  function spawnBalloon() {
+    // Difficulty: shrink radius range and increase speed as time goes on.
+    var diff = Math.min(elapsed / 75, 1); // 0..1 over ~75s
+    var minR = 30 - 8 * diff;
+    var maxR = 64 - 22 * diff;
+    var r = rand(minR, maxR);
+    var baseSpeed = rand(50, 85) + diff * 90;     // px/sec upward
+    var speed = baseSpeed * (1 + (64 - r) / 64 * 0.4); // smaller = faster
+
+    var col = choice(COLORS);
+    var x = rand(r + 10, W - r - 10);
+    balloons.push({
+      x: x, y: H + r + 20,
+      r: r, baseX: x,
+      vy: speed,
+      driftAmp: rand(18, 52),
+      driftSpeed: rand(0.5, 1.4),
+      phase: rand(0, Math.PI * 2),
+      bobPhase: rand(0, Math.PI * 2),
+      color: col.c, hi: col.h,
+      sway: rand(-0.12, 0.12)
+    });
+  }
+
+  function balloonPoints(b) {
+    // Smaller + faster => more points. Range roughly 5..50.
+    var sizeScore = (70 - b.r) / 50;          // ~0..0.8
+    var speedScore = (b.vy - 50) / 180;       // ~0..1+
+    var pts = 5 + Math.round((sizeScore * 0.6 + speedScore * 0.4) * 45);
+    return Math.max(5, Math.min(50, pts));
+  }
+
+  // ---------- Effects ----------
+  function burst(x, y, color, n) {
+    for (var i = 0; i < n; i++) {
+      var ang = rand(0, Math.PI * 2);
+      var spd = rand(60, 320);
+      particles.push({
+        x: x, y: y,
+        vx: Math.cos(ang) * spd,
+        vy: Math.sin(ang) * spd - 40,
+        life: rand(0.4, 0.8), age: 0,
+        r: rand(3, 7), color: color
+      });
+    }
+  }
+  function addFloater(x, y, text, color) {
+    floaters.push({ x: x, y: y, text: text, color: color, age: 0, life: 0.9 });
+  }
+
+  // ---------- Game flow ----------
+  function startGame() {
+    ensureAudio();
+    balloons.length = 0; particles.length = 0; floaters.length = 0;
+    score = 0; lives = MAX_LIVES; elapsed = 0; spawnTimer = 0;
+    state = STATE.PLAYING;
+    document.getElementById("start").classList.add("hidden");
+    document.getElementById("gameover").classList.add("hidden");
+    updateHUD();
+  }
+
+  function gameOver() {
+    state = STATE.OVER;
+    playLoseLife();
+    var newBest = false;
+    if (score > best) { best = score; newBest = true; try { localStorage.setItem("balloonPopBest", String(best)); } catch (e) {} }
+    document.getElementById("final-score").textContent = score;
+    document.getElementById("best-score").textContent = best;
+    document.getElementById("new-best").classList.toggle("hidden", !newBest);
+    document.getElementById("gameover").classList.remove("hidden");
+  }
+
+  function loseLife() {
+    lives--;
+    playLoseLife();
+    updateHUD();
+    flashRed = 0.4;
+    if (lives <= 0) gameOver();
+  }
+
+  var flashRed = 0;
+
+  function updateHUD() {
+    document.getElementById("score").textContent = score;
+    var hearts = "";
+    for (var i = 0; i < MAX_LIVES; i++) hearts += i < lives ? "❤️" : "🤍";
+    document.getElementById("lives").textContent = hearts;
+  }
+
+  // ---------- Input ----------
+  function handleTap(px, py) {
+    ensureAudio();
+    if (state !== STATE.PLAYING) return;
+    // Topmost (last drawn) first — iterate from end.
+    for (var i = balloons.length - 1; i >= 0; i--) {
+      var b = balloons[i];
+      var dx = px - b.x, dy = py - b.y;
+      var hitR = b.r + 14; // generous, finger-friendly
+      if (dx * dx + dy * dy <= hitR * hitR) {
+        var pts = balloonPoints(b);
+        score += pts;
+        burst(b.x, b.y, b.color, 18);
+        addFloater(b.x, b.y - b.r * 0.4, "+" + pts, b.hi);
+        playPop(Math.min(1, (70 - b.r) / 50));
+        balloons.splice(i, 1);
+        updateHUD();
+        return;
+      }
+    }
+  }
+
+  canvas.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    handleTap(e.clientX, e.clientY);
+  }, { passive: false });
+
+  document.getElementById("start-btn").addEventListener("click", startGame);
+  document.getElementById("restart-btn").addEventListener("click", startGame);
+
+  // ---------- Update ----------
+  function update(dt) {
+    if (state === STATE.PLAYING) {
+      elapsed += dt;
+
+      // Spawn cadence ramps up in escalating waves.
+      var diff = Math.min(elapsed / 75, 1);
+      var interval = 1.5 - 1.0 * diff;                 // 1.5s -> 0.5s
+      var wave = 0.25 * Math.sin(elapsed * 0.35);      // gentle ebb & flow
+      interval = Math.max(0.32, interval + wave * (1 - diff * 0.5));
+      spawnTimer -= dt;
+      if (spawnTimer <= 0) {
+        spawnBalloon();
+        // occasional double spawn at higher difficulty
+        if (Math.random() < diff * 0.4) spawnBalloon();
+        spawnTimer = interval;
+      }
+
+      // Balloons
+      for (var i = balloons.length - 1; i >= 0; i--) {
+        var b = balloons[i];
+        b.phase += dt * b.driftSpeed;
+        b.bobPhase += dt * 3;
+        b.y -= b.vy * dt;
+        b.x = b.baseX + Math.sin(b.phase) * b.driftAmp;
+        b.baseX += b.sway * b.vy * dt * 0.2;
+        // keep within walls
+        if (b.x < b.r) b.x = b.r;
+        if (b.x > W - b.r) b.x = W - b.r;
+        // escaped top
+        if (b.y + b.r < 0) {
+          balloons.splice(i, 1);
+          loseLife();
+        }
+      }
+    }
+
+    // Particles (always update so bursts finish)
+    for (var p = particles.length - 1; p >= 0; p--) {
+      var pt = particles[p];
+      pt.age += dt;
+      if (pt.age >= pt.life) { particles.splice(p, 1); continue; }
+      pt.vy += 520 * dt; // gravity
+      pt.x += pt.vx * dt;
+      pt.y += pt.vy * dt;
+    }
+    // Floaters
+    for (var f = floaters.length - 1; f >= 0; f--) {
+      var fl = floaters[f];
+      fl.age += dt;
+      if (fl.age >= fl.life) { floaters.splice(f, 1); continue; }
+      fl.y -= 60 * dt;
+    }
+
+    if (flashRed > 0) flashRed = Math.max(0, flashRed - dt);
+  }
+
+  // ---------- Draw ----------
+  function drawBalloon(b) {
+    var bob = Math.sin(b.bobPhase) * 1.5;
+    var x = b.x, y = b.y + bob, r = b.r;
+
+    // String
+    ctx.beginPath();
+    ctx.moveTo(x, y + r * 0.95);
+    ctx.quadraticCurveTo(x + Math.sin(b.phase * 2) * 6, y + r * 1.5, x, y + r * 2.1);
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Body (slightly egg-shaped)
+    var grad = ctx.createRadialGradient(x - r * 0.35, y - r * 0.45, r * 0.1, x, y, r * 1.15);
+    grad.addColorStop(0, b.hi);
+    grad.addColorStop(0.5, b.color);
+    grad.addColorStop(1, shade(b.color, -0.18));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.ellipse(x, y, r * 0.92, r, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Knot
+    ctx.fillStyle = shade(b.color, -0.2);
+    ctx.beginPath();
+    ctx.moveTo(x - r * 0.12, y + r * 0.96);
+    ctx.lineTo(x + r * 0.12, y + r * 0.96);
+    ctx.lineTo(x, y + r * 1.12);
+    ctx.closePath();
+    ctx.fill();
+
+    // Highlight glint
+    ctx.fillStyle = "rgba(255,255,255,0.45)";
+    ctx.beginPath();
+    ctx.ellipse(x - r * 0.32, y - r * 0.38, r * 0.18, r * 0.3, -0.5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // lighten/darken a hex colour
+  function shade(hex, amt) {
+    var n = parseInt(hex.slice(1), 16);
+    var r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    r = Math.max(0, Math.min(255, Math.round(r + r * amt)));
+    g = Math.max(0, Math.min(255, Math.round(g + g * amt)));
+    b = Math.max(0, Math.min(255, Math.round(b + b * amt)));
+    return "rgb(" + r + "," + g + "," + b + ")";
+  }
+
+  var cloudOffset = 0;
+  function drawClouds() {
+    cloudOffset += 0.15;
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    ctx.fillStyle = "#ffffff";
+    var positions = [
+      { x: (W * 0.2 - cloudOffset * 0.3) , y: H * 0.18, s: 1.0 },
+      { x: (W * 0.7 - cloudOffset * 0.2) , y: H * 0.30, s: 1.4 },
+      { x: (W * 0.45 - cloudOffset * 0.15), y: H * 0.5, s: 0.8 }
+    ];
+    for (var i = 0; i < positions.length; i++) {
+      var c = positions[i];
+      var cx = ((c.x % (W + 300)) + (W + 300)) % (W + 300) - 150;
+      var s = c.s * (Math.min(W, H) / 700);
+      puff(cx, c.y, 55 * s);
+    }
+    ctx.restore();
+  }
+  function puff(x, y, r) {
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.arc(x + r * 0.9, y + r * 0.15, r * 0.75, 0, Math.PI * 2);
+    ctx.arc(x - r * 0.9, y + r * 0.18, r * 0.7, 0, Math.PI * 2);
+    ctx.arc(x + r * 0.35, y - r * 0.5, r * 0.65, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function draw() {
+    // Sky
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, H);
+    drawClouds();
+
+    // Balloons
+    for (var i = 0; i < balloons.length; i++) drawBalloon(balloons[i]);
+
+    // Particles
+    for (var p = 0; p < particles.length; p++) {
+      var pt = particles[p];
+      ctx.globalAlpha = Math.max(0, 1 - pt.age / pt.life);
+      ctx.fillStyle = pt.color;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, pt.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Floaters
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (var f = 0; f < floaters.length; f++) {
+      var fl = floaters[f];
+      var t = fl.age / fl.life;
+      ctx.globalAlpha = Math.max(0, 1 - t);
+      var fs = Math.round(Math.min(W, H) * 0.045) + 8;
+      ctx.font = "900 " + fs + "px -apple-system, Segoe UI, Roboto, sans-serif";
+      ctx.lineWidth = 4; ctx.strokeStyle = "rgba(0,0,0,0.25)";
+      ctx.strokeText(fl.text, fl.x, fl.y);
+      ctx.fillStyle = fl.color;
+      ctx.fillText(fl.text, fl.x, fl.y);
+    }
+    ctx.globalAlpha = 1;
+
+    // Damage flash
+    if (flashRed > 0) {
+      ctx.fillStyle = "rgba(255,40,40," + (flashRed * 0.5) + ")";
+      ctx.fillRect(0, 0, W, H);
+    }
+  }
+
+  // ---------- Main loop ----------
+  var lastTime = 0;
+  function loop(ts) {
+    if (!lastTime) lastTime = ts;
+    var dt = (ts - lastTime) / 1000;
+    lastTime = ts;
+    if (dt > 0.05) dt = 0.05; // clamp big gaps (tab switch)
+
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // ---------- Boot ----------
+  resize();
+  updateHUD();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
